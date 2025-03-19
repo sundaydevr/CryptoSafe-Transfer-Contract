@@ -105,3 +105,60 @@
   )
 )
 
+;; Allow depositor to withdraw before recipient confirms
+(define-public (withdraw-funds (vault-id uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+      )
+      (asserts! (is-eq tx-sender depositor) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (asserts! (<= block-height (get end-block vault-data)) ERR_VAULT_EXPIRED)
+      (match (as-contract (stx-transfer? amount tx-sender depositor))
+        success-result
+          (begin
+            (map-set VaultRegistry
+              { vault-id: vault-id }
+              (merge vault-data { vault-state: "withdrawn" })
+            )
+            (print {event: "withdrawal_completed", vault-id: vault-id, depositor: depositor, amount: amount})
+            (ok true)
+          )
+        error-result ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; --- Vault Management Functions ---
+
+;; Extend vault lifetime
+(define-public (extend-vault-time (vault-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (asserts! (> additional-blocks u0) ERR_BAD_VALUE)
+    (asserts! (<= additional-blocks u1440) ERR_BAD_VALUE) ;; Max ~10 days
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data)) 
+        (recipient (get recipient vault-data))
+        (current-end (get end-block vault-data))
+        (new-end (+ current-end additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { end-block: new-end })
+      )
+      (print {event: "vault_extended", vault-id: vault-id, requester: tx-sender, new-end: new-end})
+      (ok true)
+    )
+  )
+)
+
