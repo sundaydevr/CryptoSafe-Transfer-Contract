@@ -217,3 +217,42 @@
   )
 )
 
+
+;; --- Verification Functions ---
+
+;; Add cryptographic verification
+(define-public (add-crypto-verification (vault-id uint) (sig-data (buff 65)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (print {event: "verification_added", vault-id: vault-id, signer: tx-sender, signature: sig-data})
+      (ok true)
+    )
+  )
+)
+
+;; Configure backup recovery address
+(define-public (set-recovery-address (vault-id uint) (backup-address principal))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+      )
+      (asserts! (is-eq tx-sender depositor) ERR_NOT_ALLOWED)
+      (asserts! (not (is-eq backup-address tx-sender)) (err u111)) ;; Must be different
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (print {event: "recovery_address_configured", vault-id: vault-id, depositor: depositor, backup: backup-address})
+      (ok true)
+    )
+  )
+)
+
