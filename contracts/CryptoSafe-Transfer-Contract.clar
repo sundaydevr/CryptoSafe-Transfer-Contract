@@ -315,4 +315,56 @@
   )
 )
 
+;; Flag suspicious activity
+(define-public (flag-suspicious-activity (vault-id uint) (details (string-ascii 100)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+      )
+      (asserts! (or (is-eq tx-sender VAULT_ADMIN) (is-eq tx-sender depositor) (is-eq tx-sender recipient)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") 
+                   (is-eq (get vault-state vault-data) "accepted")) 
+                ERR_ALREADY_HANDLED)
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { vault-state: "flagged" })
+      )
+      (print {event: "activity_flagged", vault-id: vault-id, reporter: tx-sender, details: details})
+      (ok true)
+    )
+  )
+)
+
+;; --- Creation Functions ---
+
+;; Create phased vault with multiple payments
+(define-public (create-phased-vault (recipient principal) (asset-id uint) (amount uint) (phases uint))
+  (let 
+    (
+      (vault-id (+ (var-get next-vault-id) u1))
+      (expiry (+ block-height VAULT_LIFETIME_BLOCKS))
+      (phase-amount (/ amount phases))
+    )
+    (asserts! (> amount u0) ERR_BAD_VALUE)
+    (asserts! (> phases u0) ERR_BAD_VALUE)
+    (asserts! (<= phases u5) ERR_BAD_VALUE) ;; Max 5 phases
+    (asserts! (validate-recipient recipient) ERR_BAD_RECIPIENT)
+    (asserts! (is-eq (* phase-amount phases) amount) (err u121)) ;; Ensure divisible
+    (match (stx-transfer? amount tx-sender (as-contract tx-sender))
+      success-result
+        (begin
+          (var-set next-vault-id vault-id)
+          (print {event: "phased_vault_created", vault-id: vault-id, depositor: tx-sender, recipient: recipient, 
+                  asset-id: asset-id, amount: amount, phases: phases, phase-amount: phase-amount})
+          (ok vault-id)
+        )
+      error-result ERR_TRANSFER_FAILED
+    )
+  )
+)
+
 
