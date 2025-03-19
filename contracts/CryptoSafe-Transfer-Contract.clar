@@ -430,3 +430,58 @@
   )
 )
 
+;; --- Metadata Functions ---
+
+;; Add vault metadata
+(define-public (attach-metadata (vault-id uint) (metadata-category (string-ascii 20)) (data-hash (buff 32)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+      )
+      ;; Authorization check
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (not (is-eq (get vault-state vault-data) "completed")) (err u160))
+      (asserts! (not (is-eq (get vault-state vault-data) "returned")) (err u161))
+      (asserts! (not (is-eq (get vault-state vault-data) "expired")) (err u162))
+
+      ;; Validate metadata category
+      (asserts! (or (is-eq metadata-category "asset-info") 
+                   (is-eq metadata-category "delivery-proof")
+                   (is-eq metadata-category "quality-report")
+                   (is-eq metadata-category "user-requirements")) (err u163))
+
+      (print {event: "metadata_attached", vault-id: vault-id, category: metadata-category, 
+              hash: data-hash, provider: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; --- Recovery Functions ---
+
+;; Setup time-locked recovery
+(define-public (setup-time-recovery (vault-id uint) (delay-blocks uint) (recovery-principal principal))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (asserts! (> delay-blocks u72) ERR_BAD_VALUE) ;; Min 72 blocks (~12 hours)
+    (asserts! (<= delay-blocks u1440) ERR_BAD_VALUE) ;; Max 1440 blocks (~10 days)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (unlock-height (+ block-height delay-blocks))
+      )
+      (asserts! (is-eq tx-sender depositor) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (asserts! (not (is-eq recovery-principal depositor)) (err u180)) ;; Different from depositor
+      (asserts! (not (is-eq recovery-principal (get recipient vault-data))) (err u181)) ;; Different from recipient
+      (print {event: "time_recovery_setup", vault-id: vault-id, depositor: depositor, 
+              recovery-principal: recovery-principal, unlock-height: unlock-height})
+      (ok unlock-height)
+    )
+  )
+)
