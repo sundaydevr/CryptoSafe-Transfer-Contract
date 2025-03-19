@@ -256,3 +256,63 @@
   )
 )
 
+;; --- Admin Functions ---
+
+;; Resolve dispute with specified division
+(define-public (resolve-dispute (vault-id uint) (depositor-percent uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (asserts! (is-eq tx-sender VAULT_ADMIN) ERR_NOT_ALLOWED)
+    (asserts! (<= depositor-percent u100) ERR_BAD_VALUE) ;; Range: 0-100%
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+        (amount (get amount vault-data))
+        (depositor-share (/ (* amount depositor-percent) u100))
+        (recipient-share (- amount depositor-share))
+      )
+      (asserts! (is-eq (get vault-state vault-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get end-block vault-data)) ERR_VAULT_EXPIRED)
+
+      ;; Send depositor's portion
+      (unwrap! (as-contract (stx-transfer? depositor-share tx-sender depositor)) ERR_TRANSFER_FAILED)
+
+      ;; Send recipient's portion
+      (unwrap! (as-contract (stx-transfer? recipient-share tx-sender recipient)) ERR_TRANSFER_FAILED)
+
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { vault-state: "resolved" })
+      )
+      (print {event: "dispute_resolved", vault-id: vault-id, depositor: depositor, recipient: recipient, 
+              depositor-share: depositor-share, recipient-share: recipient-share, depositor-percent: depositor-percent})
+      (ok true)
+    )
+  )
+)
+
+;; --- Advanced Security Functions ---
+
+;; Add approval for high-value vaults
+(define-public (add-approval-signature (vault-id uint) (approver principal))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+      )
+      ;; Only for amounts > 1000 STX
+      (asserts! (> amount u1000) (err u120))
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (print {event: "approval_added", vault-id: vault-id, approver: approver, requester: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+
