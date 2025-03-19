@@ -37,4 +37,282 @@
   (<= vault-id (var-get next-vault-id))
 )
 
+;; Validate recipient isn't contract caller
+(define-private (validate-recipient (recipient principal))
+  (and 
+    (not (is-eq recipient tx-sender))
+    (not (is-eq recipient (as-contract tx-sender)))
+  )
+)
+
+;; --- Core Functions ---
+
+;; Release funds to recipient
+(define-public (complete-transfer (vault-id uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (recipient (get recipient vault-data))
+        (amount (get amount vault-data))
+        (asset-id (get asset-id vault-data))
+      )
+      (asserts! (or (is-eq tx-sender VAULT_ADMIN) (is-eq tx-sender (get depositor vault-data))) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (asserts! (<= block-height (get end-block vault-data)) ERR_VAULT_EXPIRED)
+      (match (as-contract (stx-transfer? amount tx-sender recipient))
+        success-result
+          (begin
+            (map-set VaultRegistry
+              { vault-id: vault-id }
+              (merge vault-data { vault-state: "completed" })
+            )
+            (print {event: "transfer_completed", vault-id: vault-id, recipient: recipient, asset-id: asset-id, amount: amount})
+            (ok true)
+          )
+        error-result ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; Return funds to depositor
+(define-public (return-funds (vault-id uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+      )
+      (asserts! (is-eq tx-sender VAULT_ADMIN) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (match (as-contract (stx-transfer? amount tx-sender depositor))
+        success-result
+          (begin
+            (map-set VaultRegistry
+              { vault-id: vault-id }
+              (merge vault-data { vault-state: "returned" })
+            )
+            (print {event: "funds_returned", vault-id: vault-id, depositor: depositor, amount: amount})
+            (ok true)
+          )
+        error-result ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; Allow depositor to withdraw before recipient confirms
+(define-public (withdraw-funds (vault-id uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+      )
+      (asserts! (is-eq tx-sender depositor) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (asserts! (<= block-height (get end-block vault-data)) ERR_VAULT_EXPIRED)
+      (match (as-contract (stx-transfer? amount tx-sender depositor))
+        success-result
+          (begin
+            (map-set VaultRegistry
+              { vault-id: vault-id }
+              (merge vault-data { vault-state: "withdrawn" })
+            )
+            (print {event: "withdrawal_completed", vault-id: vault-id, depositor: depositor, amount: amount})
+            (ok true)
+          )
+        error-result ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; --- Vault Management Functions ---
+
+;; Extend vault lifetime
+(define-public (extend-vault-time (vault-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (asserts! (> additional-blocks u0) ERR_BAD_VALUE)
+    (asserts! (<= additional-blocks u1440) ERR_BAD_VALUE) ;; Max ~10 days
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data)) 
+        (recipient (get recipient vault-data))
+        (current-end (get end-block vault-data))
+        (new-end (+ current-end additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { end-block: new-end })
+      )
+      (print {event: "vault_extended", vault-id: vault-id, requester: tx-sender, new-end: new-end})
+      (ok true)
+    )
+  )
+)
+
+;; Recover expired vault funds
+(define-public (recover-expired-vault (vault-id uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+        (expiry (get end-block vault-data))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (asserts! (> block-height expiry) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? amount tx-sender depositor))
+        success-result
+          (begin
+            (map-set VaultRegistry
+              { vault-id: vault-id }
+              (merge vault-data { vault-state: "expired" })
+            )
+            (print {event: "expired_vault_recovered", vault-id: vault-id, depositor: depositor, amount: amount})
+            (ok true)
+          )
+        error-result ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; --- Dispute Resolution ---
+
+;; Open dispute on vault
+(define-public (open-dispute (vault-id uint) (reason (string-ascii 50)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (asserts! (<= block-height (get end-block vault-data)) ERR_VAULT_EXPIRED)
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { vault-state: "disputed" })
+      )
+      (print {event: "dispute_opened", vault-id: vault-id, initiator: tx-sender, reason: reason})
+      (ok true)
+    )
+  )
+)
+
+
+;; --- Verification Functions ---
+
+;; Add cryptographic verification
+(define-public (add-crypto-verification (vault-id uint) (sig-data (buff 65)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (print {event: "verification_added", vault-id: vault-id, signer: tx-sender, signature: sig-data})
+      (ok true)
+    )
+  )
+)
+
+;; Configure backup recovery address
+(define-public (set-recovery-address (vault-id uint) (backup-address principal))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+      )
+      (asserts! (is-eq tx-sender depositor) ERR_NOT_ALLOWED)
+      (asserts! (not (is-eq backup-address tx-sender)) (err u111)) ;; Must be different
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (print {event: "recovery_address_configured", vault-id: vault-id, depositor: depositor, backup: backup-address})
+      (ok true)
+    )
+  )
+)
+
+;; --- Admin Functions ---
+
+;; Resolve dispute with specified division
+(define-public (resolve-dispute (vault-id uint) (depositor-percent uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (asserts! (is-eq tx-sender VAULT_ADMIN) ERR_NOT_ALLOWED)
+    (asserts! (<= depositor-percent u100) ERR_BAD_VALUE) ;; Range: 0-100%
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+        (amount (get amount vault-data))
+        (depositor-share (/ (* amount depositor-percent) u100))
+        (recipient-share (- amount depositor-share))
+      )
+      (asserts! (is-eq (get vault-state vault-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get end-block vault-data)) ERR_VAULT_EXPIRED)
+
+      ;; Send depositor's portion
+      (unwrap! (as-contract (stx-transfer? depositor-share tx-sender depositor)) ERR_TRANSFER_FAILED)
+
+      ;; Send recipient's portion
+      (unwrap! (as-contract (stx-transfer? recipient-share tx-sender recipient)) ERR_TRANSFER_FAILED)
+
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { vault-state: "resolved" })
+      )
+      (print {event: "dispute_resolved", vault-id: vault-id, depositor: depositor, recipient: recipient, 
+              depositor-share: depositor-share, recipient-share: recipient-share, depositor-percent: depositor-percent})
+      (ok true)
+    )
+  )
+)
+
+;; --- Advanced Security Functions ---
+
+;; Add approval for high-value vaults
+(define-public (add-approval-signature (vault-id uint) (approver principal))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+      )
+      ;; Only for amounts > 1000 STX
+      (asserts! (> amount u1000) (err u120))
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (print {event: "approval_added", vault-id: vault-id, approver: approver, requester: tx-sender})
+      (ok true)
+    )
+  )
+)
+
 
