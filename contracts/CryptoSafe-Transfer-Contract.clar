@@ -533,4 +533,73 @@
   )
 )
 
+;; --- Ownership Management ---
+
+;; Transfer vault ownership
+(define-public (transfer-ownership (vault-id uint) (new-depositor principal) (auth-code (buff 32)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (current-depositor (get depositor vault-data))
+        (state (get vault-state vault-data))
+      )
+      ;; Authorization checks
+      (asserts! (or (is-eq tx-sender current-depositor) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      ;; New owner validation
+      (asserts! (not (is-eq new-depositor current-depositor)) (err u210))
+      (asserts! (not (is-eq new-depositor (get recipient vault-data))) (err u211))
+      ;; State checks
+      (asserts! (or (is-eq state "pending") (is-eq state "accepted")) ERR_ALREADY_HANDLED)
+      ;; Update ownership
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { depositor: new-depositor })
+      )
+      (print {event: "ownership_transferred", vault-id: vault-id, 
+              previous-owner: current-depositor, new-owner: new-depositor, auth-hash: (hash160 auth-code)})
+      (ok true)
+    )
+  )
+)
+
+;; --- Advanced Withdrawal Functions ---
+
+;; Secure admin withdrawal with approvals
+(define-public (admin-secured-withdrawal (vault-id uint) (withdrawal-value uint) (approval-signature (buff 65)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+        (amount (get amount vault-data))
+        (state (get vault-state vault-data))
+      )
+      ;; Admin-only function
+      (asserts! (is-eq tx-sender VAULT_ADMIN) ERR_NOT_ALLOWED)
+      ;; Only for disputed vaults
+      (asserts! (is-eq state "disputed") (err u220))
+      ;; Amount validation
+      (asserts! (<= withdrawal-value amount) ERR_BAD_VALUE)
+      ;; Time validation - minimum 48 blocks (~8 hours)
+      (asserts! (>= block-height (+ (get start-block vault-data) u48)) (err u221))
+
+      ;; Process withdrawal to depositor
+      (unwrap! (as-contract (stx-transfer? withdrawal-value tx-sender depositor)) ERR_TRANSFER_FAILED)
+
+      ;; Update vault record
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { amount: (- amount withdrawal-value) })
+      )
+
+      (print {event: "admin_withdrawal_processed", vault-id: vault-id, depositor: depositor, 
+              amount: withdrawal-value, remaining: (- amount withdrawal-value)})
+      (ok true)
+    )
+  )
+)
 
