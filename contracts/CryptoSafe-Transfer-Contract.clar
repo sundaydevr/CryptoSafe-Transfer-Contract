@@ -162,3 +162,58 @@
   )
 )
 
+;; Recover expired vault funds
+(define-public (recover-expired-vault (vault-id uint))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+        (expiry (get end-block vault-data))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (asserts! (> block-height expiry) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? amount tx-sender depositor))
+        success-result
+          (begin
+            (map-set VaultRegistry
+              { vault-id: vault-id }
+              (merge vault-data { vault-state: "expired" })
+            )
+            (print {event: "expired_vault_recovered", vault-id: vault-id, depositor: depositor, amount: amount})
+            (ok true)
+          )
+        error-result ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; --- Dispute Resolution ---
+
+;; Open dispute on vault
+(define-public (open-dispute (vault-id uint) (reason (string-ascii 50)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+      )
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq (get vault-state vault-data) "pending") (is-eq (get vault-state vault-data) "accepted")) ERR_ALREADY_HANDLED)
+      (asserts! (<= block-height (get end-block vault-data)) ERR_VAULT_EXPIRED)
+      (map-set VaultRegistry
+        { vault-id: vault-id }
+        (merge vault-data { vault-state: "disputed" })
+      )
+      (print {event: "dispute_opened", vault-id: vault-id, initiator: tx-sender, reason: reason})
+      (ok true)
+    )
+  )
+)
+
