@@ -368,3 +368,65 @@
 )
 
 
+;; --- Security Functions ---
+
+;; Schedule delayed critical operations
+(define-public (schedule-delayed-operation (operation-type (string-ascii 20)) (parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender VAULT_ADMIN) ERR_NOT_ALLOWED)
+    (asserts! (> (len parameters) u0) ERR_BAD_VALUE)
+    (let
+      (
+        (execution-time (+ block-height u144)) ;; 24hr delay
+      )
+      (print {event: "operation_scheduled", operation-type: operation-type, parameters: parameters, execution-time: execution-time})
+      (ok execution-time)
+    )
+  )
+)
+
+;; Enable security check for high-value vaults
+(define-public (enable-security-check (vault-id uint) (auth-hash (buff 32)))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (amount (get amount vault-data))
+      )
+      ;; Only for vaults above threshold
+      (asserts! (> amount u5000) (err u130))
+      (asserts! (is-eq tx-sender depositor) ERR_NOT_ALLOWED)
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+      (print {event: "security_check_enabled", vault-id: vault-id, depositor: depositor, hash: (hash160 auth-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Verify transaction with cryptographic proof
+(define-public (verify-with-crypto (vault-id uint) (msg-hash (buff 32)) (signature (buff 65)) (verifier principal))
+  (begin
+    (asserts! (vault-exists vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultRegistry { vault-id: vault-id }) ERR_VAULT_NOT_FOUND))
+        (depositor (get depositor vault-data))
+        (recipient (get recipient vault-data))
+        (verification-result (unwrap! (secp256k1-recover? msg-hash signature) (err u150)))
+      )
+      ;; Authorization checks
+      (asserts! (or (is-eq tx-sender depositor) (is-eq tx-sender recipient) (is-eq tx-sender VAULT_ADMIN)) ERR_NOT_ALLOWED)
+      (asserts! (or (is-eq verifier depositor) (is-eq verifier recipient)) (err u151))
+      (asserts! (is-eq (get vault-state vault-data) "pending") ERR_ALREADY_HANDLED)
+
+      ;; Validate signature matches claimed principal
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) verifier) (err u153))
+
+      (print {event: "cryptographically_verified", vault-id: vault-id, validator: tx-sender, signer: verifier})
+      (ok true)
+    )
+  )
+)
+
